@@ -1,0 +1,316 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@v3
+      - name: Generate Android project
+        run: |
+          mkdir -p proj && cd proj
+          mkdir -p app/src/main/java/com/bazarer/list app/src/main/res/values app/src/main/res/drawable app/src/main/assets scripts
+          cat > settings.gradle <<'EOF_X'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "BazarerList"
+          include ':app'
+          EOF_X
+          cat > build.gradle <<'EOF_X'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF_X
+          cat > gradle.properties <<'EOF_X'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          EOF_X
+          cat > app/build.gradle <<'EOF_X'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.bazarer.list'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.bazarer.list"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes {
+                  release { minifyEnabled false }
+              }
+              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+          }
+          EOF_X
+          cat > app/src/main/AndroidManifest.xml <<'EOF_X'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <queries>
+                  <intent><action android:name="android.speech.RecognitionService" /></intent>
+                  <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="https" /></intent>
+              </queries>
+              <application
+                  android:label="বাজারের লিস্ট"
+                  android:icon="@drawable/ic_launcher"
+                  android:roundIcon="@drawable/ic_launcher"
+                  android:allowBackup="true"
+                  android:usesCleartextTraffic="false"
+                  android:theme="@style/AppTheme">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_X
+          cat > app/src/main/res/values/styles.xml <<'EOF_X'
+          <resources>
+              <style name="AppTheme" parent="android:Theme.Material.Light.NoActionBar">
+                  <item name="android:statusBarColor">#047857</item>
+                  <item name="android:windowBackground">#ecfdf5</item>
+              </style>
+          </resources>
+          EOF_X
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'EOF_X'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#059669" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M30,36h8l3,6h37l-6,22h-26z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M46,72m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M68,72m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0"/>
+          </vector>
+          EOF_X
+          cat > app/src/main/java/com/bazarer/list/MainActivity.java <<'EOF_X'
+          package com.bazarer.list;
+
+          import android.Manifest;
+          import android.annotation.SuppressLint;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.print.PrintAttributes;
+          import android.print.PrintManager;
+          import android.speech.RecognitionListener;
+          import android.speech.RecognizerIntent;
+          import android.speech.SpeechRecognizer;
+          import android.view.KeyEvent;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Toast;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.util.ArrayList;
+
+          public class MainActivity extends Activity {
+              private static final int REQ_AUDIO = 101;
+              private WebView web;
+              private SpeechRecognizer recognizer;
+              private String pendingLang = "bn-BD";
+              private boolean running = false;
+
+              // Polyfill: WebView has no Web Speech API, so bridge it to Android's SpeechRecognizer.
+              private static final String POLYFILL =
+                  "(function(){if(window.__bazarSpeech)return;window.__bazarSpeech=true;var cur=null;"
+                + "function SR(){this.lang='bn-BD';this.continuous=false;this.interimResults=true;this.maxAlternatives=1;}"
+                + "SR.prototype.start=function(){cur=this;AndroidSpeech.start(this.lang||'bn-BD');};"
+                + "SR.prototype.stop=function(){AndroidSpeech.stop();};"
+                + "SR.prototype.abort=function(){AndroidSpeech.stop();};"
+                + "window.SpeechRecognition=SR;window.webkitSpeechRecognition=SR;"
+                + "window.__speechEvent=function(t,d){if(!cur)return;var s=cur,e;"
+                + "if(t==='start'){if(s.onstart)s.onstart({});}"
+                + "else if(t==='result'){var r=[{transcript:d.text,confidence:1}];r.isFinal=!!d.final;"
+                + "e={resultIndex:0,results:[r]};if(s.onresult)s.onresult(e);}"
+                + "else if(t==='error'){if(s.onerror)s.onerror({error:d.error});}"
+                + "else if(t==='end'){if(s.onend)s.onend({});}};})();";
+
+              @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  web = new WebView(this);
+                  setContentView(web);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setDatabaseEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setTextZoom(100);
+                  web.addJavascriptInterface(new Bridge(), "AndroidSpeech");
+                  web.setWebChromeClient(new WebChromeClient());
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
+                          v.evaluateJavascript(POLYFILL, null);
+                      }
+                      @Override public void onPageFinished(WebView v, String url) {
+                          v.evaluateJavascript(POLYFILL, null);
+                          // window.open -> open externally (WhatsApp share etc.)
+                          v.evaluateJavascript("window.open=function(u){if(u)location.href=u;return null;};", null);
+                          v.evaluateJavascript("window.print=function(){AndroidSpeech.print();};", null);
+                      }
+                      @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                          Uri u = r.getUrl();
+                          if ("file".equals(u.getScheme()) || "about".equals(u.getScheme())) return false;
+                          try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception e) {
+                              Toast.makeText(MainActivity.this, "লিংকটি খোলা যায়নি", Toast.LENGTH_SHORT).show();
+                          }
+                          return true;
+                      }
+                  });
+                  web.loadUrl("file:///android_asset/index.html");
+              }
+
+              private void js(String type, JSONObject data) {
+                  final String call = "window.__speechEvent&&window.__speechEvent('" + type + "'," + data.toString() + ");";
+                  runOnUiThread(() -> web.evaluateJavascript(call, null));
+              }
+
+              private void startListening() {
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                      try { js("error", new JSONObject().put("error", "service-not-allowed")); js("end", new JSONObject()); } catch (Exception ignored) {}
+                      Toast.makeText(this, "এই ফোনে ভয়েস রিকগনিশন সার্ভিস নেই (Google অ্যাপ লাগবে)", Toast.LENGTH_LONG).show();
+                      return;
+                  }
+                  if (recognizer != null) recognizer.destroy();
+                  recognizer = SpeechRecognizer.createSpeechRecognizer(this);
+                  recognizer.setRecognitionListener(new RecognitionListener() {
+                      public void onReadyForSpeech(Bundle p) { running = true; js("start", new JSONObject()); }
+                      public void onBeginningOfSpeech() {}
+                      public void onRmsChanged(float v) {}
+                      public void onBufferReceived(byte[] b) {}
+                      public void onEndOfSpeech() {}
+                      public void onEvent(int t, Bundle p) {}
+                      public void onPartialResults(Bundle p) { emit(p, false); }
+                      public void onResults(Bundle p) { emit(p, true); running = false; js("end", new JSONObject()); }
+                      public void onError(int code) {
+                          String e;
+                          switch (code) {
+                              case SpeechRecognizer.ERROR_NO_MATCH: e = "no-speech"; break;
+                              case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: e = "no-speech"; break;
+                              case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: e = "not-allowed"; break;
+                              case SpeechRecognizer.ERROR_NETWORK:
+                              case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: e = "network"; break;
+                              case SpeechRecognizer.ERROR_AUDIO: e = "audio-capture"; break;
+                              default: e = "aborted";
+                          }
+                          try { js("error", new JSONObject().put("error", e)); } catch (Exception ignored) {}
+                          running = false;
+                          js("end", new JSONObject());
+                      }
+                      private void emit(Bundle p, boolean fin) {
+                          ArrayList<String> l = p.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                          if (l == null || l.isEmpty()) return;
+                          try { js("result", new JSONObject().put("text", l.get(0)).put("final", fin)); } catch (Exception ignored) {}
+                      }
+                  });
+                  Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, pendingLang);
+                  i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+                  i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+                  recognizer.startListening(i);
+              }
+
+              private class Bridge {
+                  @JavascriptInterface public void start(String lang) {
+                      pendingLang = (lang == null || lang.isEmpty()) ? "bn-BD" : lang;
+                      runOnUiThread(() -> {
+                          if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                              requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+                          } else startListening();
+                      });
+                  }
+                  @JavascriptInterface public void stop() {
+                      runOnUiThread(() -> { if (recognizer != null) recognizer.stopListening(); });
+                  }
+                  @JavascriptInterface public void print() {
+                      runOnUiThread(() -> {
+                          PrintManager pm = (PrintManager) getSystemService(PRINT_SERVICE);
+                          pm.print("বাজারের লিস্ট", web.createPrintDocumentAdapter("BazarerList"), new PrintAttributes.Builder().build());
+                      });
+                  }
+              }
+
+              @Override public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+                  super.onRequestPermissionsResult(code, perms, res);
+                  if (code == REQ_AUDIO) {
+                      if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startListening();
+                      else {
+                          try { js("error", new JSONObject().put("error", "not-allowed")); } catch (Exception ignored) {}
+                          js("end", new JSONObject());
+                          Toast.makeText(this, "ভয়েসের জন্য মাইক্রোফোনের অনুমতি দিন", Toast.LENGTH_LONG).show();
+                      }
+                  }
+              }
+
+              @Override public boolean onKeyDown(int k, KeyEvent e) {
+                  if (k == KeyEvent.KEYCODE_BACK && web.canGoBack()) { web.goBack(); return true; }
+                  return super.onKeyDown(k, e);
+              }
+
+              @Override protected void onDestroy() {
+                  if (recognizer != null) recognizer.destroy();
+                  web.destroy();
+                  super.onDestroy();
+              }
+          }
+          EOF_X
+          cat > scripts/offline_tailwind.py <<'EOF_X'
+          """Replace the Tailwind CDN <script> in index.html with a precompiled inline <style>,
+          so the app's layout works without internet. Usage: offline_tailwind.py index.html compiled.css"""
+          import re, sys
+          html_path, css_path = sys.argv[1], sys.argv[2]
+          h = open(html_path, encoding="utf-8").read()
+          css = open(css_path, encoding="utf-8").read()
+          h = re.sub(r'<script src="https://cdn\.tailwindcss\.com[^"]*"></script>\s*', '', h, count=1)
+          h = re.sub(r'<script>\s*tailwind\.config\s*=.*?</script>\s*', '', h, count=1, flags=re.S)
+          h = h.replace('</head>', '<style>\n' + css + '\n</style>\n</head>', 1)
+          open(html_path, "w", encoding="utf-8").write(h)
+          print("tailwind inlined:", len(css), "bytes")
+          EOF_X
+          cat > scripts/tailwind.config.js <<'EOF_X'
+          module.exports = {
+            darkMode: 'class',
+            content: ['./app/src/main/assets/index.html'],
+            theme: { extend: {
+              fontFamily: { sans: ['"Hind Siliguri"', 'Inter', 'sans-serif'] },
+              colors: { emerald: { 50:'#ecfdf5',100:'#d1fae5',500:'#10b981',600:'#059669',700:'#047857',800:'#065f46',900:'#064e3b' } }
+            } }
+          };
+          EOF_X
+          cp ../index.html app/src/main/assets/index.html
+      - name: Precompile Tailwind for offline use
+        continue-on-error: true
+        working-directory: proj
+        run: |
+          echo '@tailwind base; @tailwind components; @tailwind utilities;' > /tmp/in.css
+          npx --yes tailwindcss@3.4.17 -c scripts/tailwind.config.js -i /tmp/in.css -o /tmp/out.css --minify
+          python3 scripts/offline_tailwind.py app/src/main/assets/index.html /tmp/out.css
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.9' }
+      - name: Build
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BazarerList-apk
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
